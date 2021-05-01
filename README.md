@@ -30,3 +30,8 @@ I will add a series of versions and each of them works according to what I remeb
 
 Help needed:
 If someone manages to get this data to work: https://github.com/teddykoker/quant/tree/master/survivorship-free/data within the provided code, I would be super happy to know how. I haven't tried to add additional informaiton to the data so backtrader knows how long each symbol can be used, but hopefully there is an easier way. I tried to make it work in the "Sur" strategy, but failed big time.
+
+Since sharing ist caring:
+Here the super lazy version (haven't tested multiprocess on Colab):
+https://colab.research.google.com/drive/1VgHUZNRFZNwoA-wvWvC3KxQMhnvI5xVR?usp=sharing
+One just has to copy it and set up the folder structure.
