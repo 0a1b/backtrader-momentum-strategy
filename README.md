@@ -35,3 +35,6 @@ Since sharing ist caring:
 Here the super lazy version (haven't tested multiprocess on Colab):
 https://colab.research.google.com/drive/1VgHUZNRFZNwoA-wvWvC3KxQMhnvI5xVR?usp=sharing
 One just has to copy it and set up the folder structure.
+
+Update:
+Colab Version has been changed from yahoofinance to pandas_datareader version 0.10 as data source due to Yahoo query changes on July 1st 2021. Please change v1.0 accordingly.
