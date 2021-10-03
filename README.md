@@ -34,9 +34,9 @@ Help needed:
 If someone manages to get this data to work: https://github.com/teddykoker/quant/tree/master/survivorship-free/data within the provided code, I would be super happy to know how. I haven't tried to add additional informaiton to the data so backtrader knows how long each symbol can be used, but hopefully there is an easier way. I tried to make it work in the "Sur" strategy, but failed big time.
 
 Since sharing ist caring:
-Here the super lazy version:
-https://colab.research.google.com/drive/1VgHUZNRFZNwoA-wvWvC3KxQMhnvI5xVR?usp=sharing
+Here the super lazy version 1.1:
+https://colab.research.google.com/drive/1agpdXHxUUeA-C0PQHY38BB_V2w1F5Wo9?usp=sharing
 One just has to copy it and set up the folder structure in ones google drive.
 
 Update:
-Colab Version has been changed from yahoofinance to pandas_datareader version 0.10 as data source due to Yahoo query changes on July 1st 2021. Please change v1.0 accordingly.
+Colab Link has been updated. Comments now possible.
