@@ -39,4 +39,4 @@ https://colab.research.google.com/drive/1agpdXHxUUeA-C0PQHY38BB_V2w1F5Wo9?usp=sh
 One just has to copy it and set up the folder structure in ones google drive.
 
 Update:
-Colab Link has been updated. Comments now possible.
+Colab version fixed. Datareader fix with yFinance.
