@@ -1,0 +1,10 @@
+numba<0.59.0
+numpy==1.25.2
+openpyxl
+pandas
+pandas_datareader
+plotly
+quantstats
+vectorbt
+yfinance
+anywidget
