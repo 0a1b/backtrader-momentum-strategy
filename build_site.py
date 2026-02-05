@@ -307,13 +307,18 @@ def main() -> int:
     mom_df = pd.DataFrame(mom, index=close.index, columns=close.columns)
 
     last = mom_df.iloc[-1].dropna()
+    
     ranked = (
         last.sort_values(ascending=False)
-        .head(TOP_N)
-        .reset_index()
-        .rename(columns={"index": "ticker", last.name: "momentum"})
+            .head(TOP_N)
+            .reset_index(name="momentum")   # <-- Series.reset_index(name=...) is key
     )
+    
+    # First column is the tickers, whatever its name is
+    ranked = ranked.rename(columns={ranked.columns[0]: "ticker"})
+    
     ranked.insert(0, "rank", np.arange(1, len(ranked) + 1))
+
 
     ranked.to_csv("ranking.csv", index=False)
 
