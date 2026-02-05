@@ -13,8 +13,8 @@ WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
 
 LOOKBACK_PERIOD = int(os.getenv("LOOKBACK_PERIOD", "250"))
 ROC_PERIOD = int(os.getenv("ROC_PERIOD", "250"))
-TOP_N = int(os.getenv("TOP_N", "25"))
-YF_PERIOD = os.getenv("YF_PERIOD", "5y")  # ensure enough data
+TOP_N = int(os.getenv("TOP_N", "5"))
+YF_PERIOD = os.getenv("YF_PERIOD", "2y")  # ensure enough data
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
