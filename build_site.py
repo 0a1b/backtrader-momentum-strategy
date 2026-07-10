@@ -20,7 +20,8 @@ except ImportError:
     _HAS_CURL_CFFI = False
 
 
-WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
+# Updated URL constant
+WIKI_URL = "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
 
 LOOKBACK_PERIOD = int(os.getenv("LOOKBACK_PERIOD", "250"))
 ROC_PERIOD = int(os.getenv("ROC_PERIOD", "250"))
@@ -39,42 +40,22 @@ MIN_ROWS_REQUIRED = LOOKBACK_PERIOD + ROC_PERIOD + 10
 
 
 # --------------------------------------------------------------------------
-# NASDAQ-100 constituent scraping (with debug dump + cache fallback)
+# NASDAQ-100 constituent scraping (direct page fetch)
 # --------------------------------------------------------------------------
 
 def _fetch_nasdaq100_html() -> str:
     """
-    Fetch the rendered HTML of the Nasdaq-100 article via the Wikipedia API
-    (action=parse) rather than scraping the raw article URL. The API is a
-    stable, documented contract; the raw HTML page can vary subtly between
-    requests (sort-key spans, footnote markers, etc.) in ways that break
-    naive string matching on header text.
+    Fetch the raw HTML of the provided NASDAQ-100 Wikipedia URL.
     """
-    params = {
-        "action": "parse",
-        "page": "Nasdaq-100",
-        "prop": "text",
-        "format": "json",
-        "formatversion": "2",
-    }
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
-    r = requests.get(WIKI_API_URL, params=params, headers=headers, timeout=30)
+    r = requests.get(WIKI_URL, headers=headers, timeout=30)
     r.raise_for_status()
 
-    try:
-        data = r.json()
-    except ValueError as e:
-        debug_path = Path("wiki_debug.html")
-        debug_path.write_text(r.text, encoding="utf-8")
-        raise RuntimeError(
-            f"Wikipedia API did not return JSON (status {r.status_code}). "
-            f"Dumped raw response to {debug_path}."
-        ) from e
+    # Save to debug path on failure
+    if not r.text:
+        raise RuntimeError("Wikipedia returned an empty page.")
 
-    if "parse" not in data or "text" not in data["parse"]:
-        raise RuntimeError(f"Unexpected Wikipedia API response shape: {json.dumps(data)[:500]}")
-
-    return data["parse"]["text"]
+    return r.text
 
 
 TICKER_RE = re.compile(r"^[A-Z]{1,6}([.-][A-Z])?$")
@@ -110,9 +91,7 @@ def _looks_like_components_table(table) -> tuple[bool, int, float]:
 def _find_components_table(soup, tables):
     """
     Try the cheap header-text match first; fall back to a structural scan
-    of every <table> on the page (not just class="wikitable") that looks
-    like it holds ~100 ticker symbols in its first column. This is immune
-    to Wikipedia renaming headers or changing table classes.
+    of every <table> on the page.
     """
     for table in tables:
         ths = [th.get_text(strip=True) for th in table.find_all("th")]
@@ -129,8 +108,7 @@ def _find_components_table(soup, tables):
             candidates.append((row_count, ratio, table))
 
     if candidates:
-        # Prefer the largest matching table (the full constituent list,
-        # not a smaller "top 10 holdings" style table).
+        # Prefer the largest matching table
         candidates.sort(key=lambda c: c[0], reverse=True)
         return candidates[0][2]
 
@@ -140,6 +118,7 @@ def _find_components_table(soup, tables):
 def _scrape_nasdaq100_symbols() -> list[str]:
     html = _fetch_nasdaq100_html()
     soup = BeautifulSoup(html, "html.parser")
+    # Finding wikitables specifically
     tables = soup.find_all("table", class_="wikitable")
 
     target = _find_components_table(soup, tables)
@@ -150,9 +129,7 @@ def _scrape_nasdaq100_symbols() -> list[str]:
         all_headers = [[th.get_text(strip=True) for th in t.find_all("th")] for t in tables]
         headers_preview = " | ".join(str(h[:6]) for h in all_headers)
         raise RuntimeError(
-            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s) "
-            f"and {len(soup.find_all('table'))} table(s) total. "
-            f"Wikitable headers seen: {headers_preview}. "
+            f"Could not find NASDAQ-100 table at {WIKI_URL}. "
             f"Dumped response to {debug_path} for inspection."
         )
 
@@ -171,7 +148,7 @@ def _scrape_nasdaq100_symbols() -> list[str]:
             out.append(s)
             seen.add(s)
 
-    if len(out) < 90:  # sanity check: index has ~100 members
+    if len(out) < 90:
         raise RuntimeError(f"Only parsed {len(out)} symbols, expected ~100 — table likely malformed.")
 
     return out
@@ -187,11 +164,10 @@ def get_nasdaq100_symbols() -> list[str]:
         if SYMBOLS_CACHE.exists():
             cached = json.loads(SYMBOLS_CACHE.read_text())
             print(f"Wikipedia scrape failed ({e}); falling back to cached list "
-                  f"({len(cached)} symbols, cached at last successful run).")
+                  f"({len(cached)} symbols).")
             return cached
         raise RuntimeError(
-            f"Wikipedia scrape failed ({e}) and no cached symbol list exists yet. "
-            f"Cannot continue."
+            f"Wikipedia scrape failed ({e}) and no cached symbol list exists yet."
         ) from e
 
 
@@ -216,7 +192,7 @@ def _download_close(tickers: list[str], period: str, max_retries: int = 5) -> pd
                 interval="1d",
                 auto_adjust=True,
                 group_by="column",
-                threads=False,  # sequential is friendlier to rate limits
+                threads=False,
                 progress=False,
             )
             if session is not None:
@@ -230,9 +206,8 @@ def _download_close(tickers: list[str], period: str, max_retries: int = 5) -> pd
             last_err = e
             df = None
 
-        wait = min(2 ** attempt * 10, 120)  # 10, 20, 40, 80, 120s cap
-        print(f"[{attempt + 1}/{max_retries}] Download empty/failed "
-              f"({last_err if last_err else 'no data'}); retrying in {wait}s...")
+        wait = min(2 ** attempt * 10, 120)
+        print(f"[{attempt + 1}/{max_retries}] Download empty/failed; retrying in {wait}s...")
         time.sleep(wait)
     else:
         raise RuntimeError(f"yfinance download failed after {max_retries} attempts: {last_err}")
@@ -248,17 +223,11 @@ def _download_close(tickers: list[str], period: str, max_retries: int = 5) -> pd
 
 
 def get_price_data(symbols: list[str]) -> pd.DataFrame:
-    """
-    Downloads QQQ (benchmark calendar) + constituent closes.
-    Falls back to last cached close.csv if the live download fails
-    or comes back too short to run the momentum calc.
-    """
     try:
         bench = _download_close(["QQQ"], YF_PERIOD)["QQQ"].dropna()
         if len(bench) < MIN_ROWS_REQUIRED:
             raise RuntimeError(
-                f"QQQ benchmark only has {len(bench)} rows "
-                f"(need >= {MIN_ROWS_REQUIRED}) — likely rate-limited."
+                f"QQQ benchmark only has {len(bench)} rows — likely rate-limited."
             )
         target_index = bench.index
 
@@ -268,7 +237,7 @@ def get_price_data(symbols: list[str]) -> pd.DataFrame:
         close = close.loc[:, (close > 0).all(axis=0)]
 
         if close.shape[1] < 10:
-            raise RuntimeError(f"Too few symbols after filtering for full history: {close.shape[1]}")
+            raise RuntimeError(f"Too few symbols after filtering: {close.shape[1]}")
 
         close.to_csv(PRICE_CACHE)
         print(f"Downloaded fresh price data: {close.shape[0]} rows x {close.shape[1]} symbols.")
@@ -276,36 +245,21 @@ def get_price_data(symbols: list[str]) -> pd.DataFrame:
 
     except Exception as e:
         if PRICE_CACHE.exists():
-            print(f"Live price download failed ({e}); falling back to cached data at {PRICE_CACHE}.")
+            print(f"Live price download failed ({e}); falling back to cached data.")
             close = pd.read_csv(PRICE_CACHE, index_col=0, parse_dates=True)
             if close.shape[0] < MIN_ROWS_REQUIRED or close.shape[1] < 10:
-                raise RuntimeError(
-                    f"Cached price data also insufficient "
-                    f"({close.shape[0]} rows x {close.shape[1]} symbols). Cannot continue."
-                ) from e
+                raise RuntimeError("Cached price data insufficient.") from e
             return close
-        raise RuntimeError(
-            f"Live price download failed ({e}) and no cached price data exists yet. Cannot continue."
-        ) from e
+        raise RuntimeError(f"Live price download failed ({e}) and no cached data.") from e
 
 
 # --------------------------------------------------------------------------
-# Momentum calc (unchanged from original notebook-equivalent implementation)
+# Momentum calc
 # --------------------------------------------------------------------------
 
 def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndarray:
-    """
-    This function mirrors the notebook's momentum(...) implementation:
-    - ROC gating: ceil(((shifted - data) / data) * 100) clipped to [0,1]
-    - Rolling regression slope on log(price) over lookback_period
-    - Annualize: (1 + slope) ** 252
-    - Final: res = roc * values   (correlation is computed but NOT applied)
-    """
     if data.shape[0] < lookback_period + roc_period:
-        raise ValueError(
-            f"Not enough rows ({data.shape[0]}) for lookback_period={lookback_period} "
-            f"+ roc_period={roc_period}. Need at least {lookback_period + roc_period}."
-        )
+        raise ValueError("Not enough rows for requested periods.")
 
     shifted_values = np.zeros(data.shape)
     shifted_values[: shifted_values.shape[0] - roc_period, :] = data[roc_period:, :]
@@ -317,19 +271,18 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
     roc = np.minimum(np.full(roc.shape, 1), roc)
 
     xxx = np.vstack([np.arange(lookback_period), np.ones(lookback_period)]).T
-    beta = np.linalg.inv(xxx.T @ xxx) @ xxx.T  # shape (2, lookback_period)
+    beta = np.linalg.inv(xxx.T @ xxx) @ xxx.T
 
     values = np.zeros((data.shape[0] - lookback_period, data.shape[1]))
-    correl = np.zeros((data.shape[0] - lookback_period, data.shape[1]))  # unused later (kept for fidelity)
+    correl = np.zeros((data.shape[0] - lookback_period, data.shape[1]))
 
     for i in range(data.shape[1]):
         cur_data = np.log(data[:, i])
-
         view = np.lib.stride_tricks.sliding_window_view(cur_data, (lookback_period,))[1:, :]
-        lin_reg = beta @ view.T  # shape (2, n_windows)
+        lin_reg = beta @ view.T
 
-        roll_mat = lin_reg[0]  # slope
-        lin_reg_b = lin_reg[1]  # intercept
+        roll_mat = lin_reg[0]
+        lin_reg_b = lin_reg[1]
 
         x = view
         line = np.arange(x.shape[1])
@@ -358,8 +311,7 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
         values = values[new_shape:, :]
         correl = correl[new_shape:, :]
 
-    res = roc * values  # * correl
-
+    res = roc * values
     original = np.full((data.shape[0], data.shape[1]), np.nan)
     original[original.shape[0] - res.shape[0] :, :] = res
     return original
@@ -391,109 +343,38 @@ def render_html(ranked: pd.DataFrame, updated: str, lookback: int, roc: int) -> 
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>NASDAQ-100 Momentum</title>
   <style>
-    :root {{
-      --bg: #0b0f17;
-      --card: rgba(17,24,39,0.88);
-      --text: #e5e7eb;
-      --muted: #94a3b8;
-      --line: #243041;
-      --accent: #60a5fa;
-      --gold: #fbbf24;
-    }}
-    body {{
-      margin: 0; padding: 24px;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      background:
-        radial-gradient(1200px 800px at 20% 0%, rgba(96,165,250,0.16), transparent 60%),
-        radial-gradient(1000px 700px at 100% 30%, rgba(251,191,36,0.12), transparent 55%),
-        var(--bg);
-      color: var(--text);
-      display: flex;
-      justify-content: center;
-    }}
+    :root {{ --bg: #0b0f17; --card: rgba(17,24,39,0.88); --text: #e5e7eb; --muted: #94a3b8; --line: #243041; --accent: #60a5fa; --gold: #fbbf24; }}
+    body {{ margin: 0; padding: 24px; font-family: system-ui; background: var(--bg); color: var(--text); display: flex; justify-content: center; }}
     .wrap {{ width: 100%; max-width: 820px; }}
-    h1 {{ margin: 0; font-size: 22px; letter-spacing: 0.2px; }}
-    .sub {{ margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.35; }}
-    .card {{
-      margin-top: 14px;
-      background: var(--card);
-      border: 1px solid rgba(36,48,65,0.9);
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-    }}
-    .bar {{
-      display:flex; justify-content: space-between; align-items:center;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-      gap: 10px;
-      flex-wrap: wrap;
-    }}
-    .pill {{
-      font-size: 12px; color: var(--muted);
-      padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
-      background: rgba(2,6,23,0.35);
-    }}
+    .card {{ margin-top: 14px; background: var(--card); border: 1px solid rgba(36,48,65,0.9); border-radius: 14px; overflow: hidden; }}
+    .bar {{ display:flex; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }}
+    .pill {{ font-size: 12px; color: var(--muted); padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(2,6,23,0.35); }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ padding: 12px 14px; border-bottom: 1px solid var(--line); }}
-    th {{
-      font-size: 11px; color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.08em;
-      text-align: left;
-      background: rgba(2,6,23,0.35);
-    }}
+    th {{ font-size: 11px; color: var(--muted); text-transform: uppercase; text-align: left; background: rgba(2,6,23,0.35); }}
     td.num, th.num {{ text-align: right; }}
-    td.rank {{ width: 76px; color: var(--muted); font-weight: 800; }}
-    td.ticker {{ font-weight: 850; letter-spacing: 0.02em; }}
-    td.mom {{
-      color: var(--gold);
-      font-variant-numeric: tabular-nums;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    }}
+    td.rank {{ color: var(--muted); font-weight: 800; }}
+    td.ticker {{ font-weight: 850; }}
+    td.mom {{ color: var(--gold); }}
     tr.top td.rank {{ color: var(--accent); }}
-    tr.top td.ticker {{ color: #fff; }}
-    .footer {{
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 12px;
-      display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
+    .footer {{ margin-top: 12px; color: var(--muted); font-size: 12px; }}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div>
-      <h1>NASDAQ‑100 Momentum Ranking</h1>
-      <div class="sub">Calculated like your notebook’s <code>momentum(...)</code>: ROC gate × annualized slope. Top 10 highlighted.</div>
-    </div>
-
+    <h1>NASDAQ‑100 Momentum Ranking</h1>
     <div class="card">
       <div class="bar">
         <div class="pill">Lookback: {lookback} days</div>
         <div class="pill">ROC period: {roc} days</div>
         <div class="pill">Updated: {updated}</div>
       </div>
-
       <table>
-        <thead>
-          <tr>
-            <th>Rank</th>
-            <th>Ticker</th>
-            <th class="num">Momentum</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows_html}
-        </tbody>
+        <thead><tr><th>Rank</th><th>Ticker</th><th class="num">Momentum</th></tr></thead>
+        <tbody>{rows_html}</tbody>
       </table>
     </div>
-
-    <div class="footer">
-      <div><a href="ranking.csv">Download CSV</a></div>
-      <div>Universe source: Wikipedia NASDAQ‑100 constituents.</div>
-    </div>
+    <div class="footer">Universe source: Wikipedia NASDAQ‑100 constituents.</div>
   </div>
 </body>
 </html>
