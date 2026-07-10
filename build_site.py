@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
 import os
+import time
 import datetime as dt
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import yfinance as yf
+
+try:
+    from curl_cffi import requests as cffi_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
 
 
 WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
@@ -21,22 +31,39 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+SYMBOLS_CACHE = Path("nasdaq100_symbols.json")
+PRICE_CACHE = Path("close_cache.csv")
 
-def get_nasdaq100_symbols() -> list[str]:
-    headers = {"User-Agent": USER_AGENT}
+MIN_ROWS_REQUIRED = LOOKBACK_PERIOD + ROC_PERIOD + 10
+
+
+# --------------------------------------------------------------------------
+# NASDAQ-100 constituent scraping (with debug dump + cache fallback)
+# --------------------------------------------------------------------------
+
+def _scrape_nasdaq100_symbols() -> list[str]:
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
     r = requests.get(WIKI_URL, headers=headers, timeout=30)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
 
+    soup = BeautifulSoup(r.text, "html.parser")
     tables = soup.find_all("table", class_="wikitable")
+
     target = None
     for table in tables:
         ths = [th.get_text(strip=True) for th in table.find_all("th")]
         if "Ticker" in ths:
             target = table
             break
+
     if target is None:
-        raise RuntimeError("Could not find NASDAQ-100 components table (Ticker column).")
+        debug_path = Path("wiki_debug.html")
+        debug_path.write_text(r.text, encoding="utf-8")
+        raise RuntimeError(
+            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s), "
+            f"response length {len(r.text)}, status {r.status_code}. "
+            f"Dumped response to {debug_path} for inspection."
+        )
 
     symbols = []
     for row in target.find_all("tr")[1:]:
@@ -44,40 +71,136 @@ def get_nasdaq100_symbols() -> list[str]:
         if not cols:
             continue
         ticker = cols[0].get_text(strip=True)
-        # Yahoo uses BRK-B style; Wikipedia sometimes uses dots
-        ticker = ticker.replace(".", "-")
+        ticker = ticker.replace(".", "-")  # Yahoo uses BRK-B style
         symbols.append(ticker)
 
-    # De-dup, preserve order
     out, seen = [], set()
     for s in symbols:
         if s and s not in seen:
             out.append(s)
             seen.add(s)
+
+    if len(out) < 90:  # sanity check: index has ~100 members
+        raise RuntimeError(f"Only parsed {len(out)} symbols, expected ~100 — table likely malformed.")
+
     return out
 
 
-def _download_close(tickers: list[str], period: str) -> pd.DataFrame:
-    df = yf.download(
-        tickers,
-        period=period,
-        interval="1d",
-        auto_adjust=True,
-        group_by="column",
-        threads=True,
-        progress=False,
-    )
+def get_nasdaq100_symbols() -> list[str]:
+    try:
+        symbols = _scrape_nasdaq100_symbols()
+        SYMBOLS_CACHE.write_text(json.dumps(symbols))
+        print(f"Scraped {len(symbols)} NASDAQ-100 symbols from Wikipedia.")
+        return symbols
+    except Exception as e:
+        if SYMBOLS_CACHE.exists():
+            cached = json.loads(SYMBOLS_CACHE.read_text())
+            print(f"Wikipedia scrape failed ({e}); falling back to cached list "
+                  f"({len(cached)} symbols, cached at last successful run).")
+            return cached
+        raise RuntimeError(
+            f"Wikipedia scrape failed ({e}) and no cached symbol list exists yet. "
+            f"Cannot continue."
+        ) from e
+
+
+# --------------------------------------------------------------------------
+# Price downloads (with browser impersonation, retry/backoff, cache fallback)
+# --------------------------------------------------------------------------
+
+def _make_yf_session():
+    if _HAS_CURL_CFFI:
+        return cffi_requests.Session(impersonate="chrome")
+    return None  # yfinance will use its own default session
+
+
+def _download_close(tickers: list[str], period: str, max_retries: int = 5) -> pd.DataFrame:
+    session = _make_yf_session()
+    last_err = None
+
+    for attempt in range(max_retries):
+        try:
+            kwargs = dict(
+                period=period,
+                interval="1d",
+                auto_adjust=True,
+                group_by="column",
+                threads=False,  # sequential is friendlier to rate limits
+                progress=False,
+            )
+            if session is not None:
+                kwargs["session"] = session
+
+            df = yf.download(tickers, **kwargs)
+
+            if df is not None and not df.empty:
+                break
+        except Exception as e:
+            last_err = e
+            df = None
+
+        wait = min(2 ** attempt * 10, 120)  # 10, 20, 40, 80, 120s cap
+        print(f"[{attempt + 1}/{max_retries}] Download empty/failed "
+              f"({last_err if last_err else 'no data'}); retrying in {wait}s...")
+        time.sleep(wait)
+    else:
+        raise RuntimeError(f"yfinance download failed after {max_retries} attempts: {last_err}")
 
     if isinstance(df.columns, pd.MultiIndex):
         close = df["Close"].copy()
     else:
-        # single-ticker fallback
         close = df[["Close"]].rename(columns={"Close": tickers[0]})
 
     close.index = pd.to_datetime(close.index)
     close = close.sort_index()
     return close
 
+
+def get_price_data(symbols: list[str]) -> pd.DataFrame:
+    """
+    Downloads QQQ (benchmark calendar) + constituent closes.
+    Falls back to last cached close.csv if the live download fails
+    or comes back too short to run the momentum calc.
+    """
+    try:
+        bench = _download_close(["QQQ"], YF_PERIOD)["QQQ"].dropna()
+        if len(bench) < MIN_ROWS_REQUIRED:
+            raise RuntimeError(
+                f"QQQ benchmark only has {len(bench)} rows "
+                f"(need >= {MIN_ROWS_REQUIRED}) — likely rate-limited."
+            )
+        target_index = bench.index
+
+        close = _download_close(symbols, YF_PERIOD)
+        close = close.reindex(target_index)
+        close = close.dropna(axis=1, how="any")
+        close = close.loc[:, (close > 0).all(axis=0)]
+
+        if close.shape[1] < 10:
+            raise RuntimeError(f"Too few symbols after filtering for full history: {close.shape[1]}")
+
+        close.to_csv(PRICE_CACHE)
+        print(f"Downloaded fresh price data: {close.shape[0]} rows x {close.shape[1]} symbols.")
+        return close
+
+    except Exception as e:
+        if PRICE_CACHE.exists():
+            print(f"Live price download failed ({e}); falling back to cached data at {PRICE_CACHE}.")
+            close = pd.read_csv(PRICE_CACHE, index_col=0, parse_dates=True)
+            if close.shape[0] < MIN_ROWS_REQUIRED or close.shape[1] < 10:
+                raise RuntimeError(
+                    f"Cached price data also insufficient "
+                    f"({close.shape[0]} rows x {close.shape[1]} symbols). Cannot continue."
+                ) from e
+            return close
+        raise RuntimeError(
+            f"Live price download failed ({e}) and no cached price data exists yet. Cannot continue."
+        ) from e
+
+
+# --------------------------------------------------------------------------
+# Momentum calc (unchanged from original notebook-equivalent implementation)
+# --------------------------------------------------------------------------
 
 def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndarray:
     """
@@ -87,6 +210,12 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
     - Annualize: (1 + slope) ** 252
     - Final: res = roc * values   (correlation is computed but NOT applied)
     """
+    if data.shape[0] < lookback_period + roc_period:
+        raise ValueError(
+            f"Not enough rows ({data.shape[0]}) for lookback_period={lookback_period} "
+            f"+ roc_period={roc_period}. Need at least {lookback_period + roc_period}."
+        )
+
     shifted_values = np.zeros(data.shape)
     shifted_values[: shifted_values.shape[0] - roc_period, :] = data[roc_period:, :]
 
@@ -97,7 +226,6 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
     roc = np.minimum(np.full(roc.shape, 1), roc)
 
     xxx = np.vstack([np.arange(lookback_period), np.ones(lookback_period)]).T
-    # precompute (X'X)^-1 X'
     beta = np.linalg.inv(xxx.T @ xxx) @ xxx.T  # shape (2, lookback_period)
 
     values = np.zeros((data.shape[0] - lookback_period, data.shape[1]))
@@ -112,7 +240,6 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
         roll_mat = lin_reg[0]  # slope
         lin_reg_b = lin_reg[1]  # intercept
 
-        # Build fitted line and correlation (not used in final res, but kept)
         x = view
         line = np.arange(x.shape[1])
         m = roll_mat[:, np.newaxis]
@@ -140,7 +267,6 @@ def momentum(data: np.ndarray, lookback_period: int, roc_period: int) -> np.ndar
         values = values[new_shape:, :]
         correl = correl[new_shape:, :]
 
-    # Final calculation (as in notebook; correlation NOT applied)
     res = roc * values  # * correl
 
     original = np.full((data.shape[0], data.shape[1]), np.nan)
@@ -285,40 +411,20 @@ def render_html(ranked: pd.DataFrame, updated: str, lookback: int, roc: int) -> 
 
 def main() -> int:
     symbols = get_nasdaq100_symbols()
+    close = get_price_data(symbols)
 
-    # Use QQQ as benchmark calendar (similar spirit to the notebook's benchmark handling)
-    bench = _download_close(["QQQ"], YF_PERIOD)["QQQ"].dropna()
-    target_index = bench.index
-
-    close = _download_close(symbols, YF_PERIOD)
-    close = close.reindex(target_index)
-
-    # Keep only symbols with complete history over the benchmark calendar
-    close = close.dropna(axis=1, how="any")
-
-    # Safety: drop non-positive prices (log)
-    close = close.loc[:, (close > 0).all(axis=0)]
-
-    if close.shape[1] < 10:
-        raise RuntimeError(f"Too few symbols after filtering for full history: {close.shape[1]}")
-
-    # Momentum calc (notebook-equivalent)
     mom = momentum(close.to_numpy(dtype=float), LOOKBACK_PERIOD, ROC_PERIOD)
     mom_df = pd.DataFrame(mom, index=close.index, columns=close.columns)
 
     last = mom_df.iloc[-1].dropna()
-    
+
     ranked = (
         last.sort_values(ascending=False)
             .head(TOP_N)
-            .reset_index(name="momentum")   # <-- Series.reset_index(name=...) is key
+            .reset_index(name="momentum")
     )
-    
-    # First column is the tickers, whatever its name is
     ranked = ranked.rename(columns={ranked.columns[0]: "ticker"})
-    
     ranked.insert(0, "rank", np.arange(1, len(ranked) + 1))
-
 
     ranked.to_csv("ranking.csv", index=False)
 
