@@ -19,7 +19,7 @@ except ImportError:
     _HAS_CURL_CFFI = False
 
 
-WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
+WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
 
 LOOKBACK_PERIOD = int(os.getenv("LOOKBACK_PERIOD", "250"))
 ROC_PERIOD = int(os.getenv("ROC_PERIOD", "250"))
@@ -41,27 +41,64 @@ MIN_ROWS_REQUIRED = LOOKBACK_PERIOD + ROC_PERIOD + 10
 # NASDAQ-100 constituent scraping (with debug dump + cache fallback)
 # --------------------------------------------------------------------------
 
-def _scrape_nasdaq100_symbols() -> list[str]:
+def _fetch_nasdaq100_html() -> str:
+    """
+    Fetch the rendered HTML of the Nasdaq-100 article via the Wikipedia API
+    (action=parse) rather than scraping the raw article URL. The API is a
+    stable, documented contract; the raw HTML page can vary subtly between
+    requests (sort-key spans, footnote markers, etc.) in ways that break
+    naive string matching on header text.
+    """
+    params = {
+        "action": "parse",
+        "page": "Nasdaq-100",
+        "prop": "text",
+        "format": "json",
+        "formatversion": "2",
+    }
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
-    r = requests.get(WIKI_URL, headers=headers, timeout=30)
+    r = requests.get(WIKI_API_URL, params=params, headers=headers, timeout=30)
     r.raise_for_status()
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    try:
+        data = r.json()
+    except ValueError as e:
+        debug_path = Path("wiki_debug.html")
+        debug_path.write_text(r.text, encoding="utf-8")
+        raise RuntimeError(
+            f"Wikipedia API did not return JSON (status {r.status_code}). "
+            f"Dumped raw response to {debug_path}."
+        ) from e
+
+    if "parse" not in data or "text" not in data["parse"]:
+        raise RuntimeError(f"Unexpected Wikipedia API response shape: {json.dumps(data)[:500]}")
+
+    return data["parse"]["text"]
+
+
+def _scrape_nasdaq100_symbols() -> list[str]:
+    html = _fetch_nasdaq100_html()
+    soup = BeautifulSoup(html, "html.parser")
     tables = soup.find_all("table", class_="wikitable")
 
     target = None
+    all_headers = []
     for table in tables:
         ths = [th.get_text(strip=True) for th in table.find_all("th")]
-        if "Ticker" in ths:
+        all_headers.append(ths)
+        # Lenient match: case-insensitive substring, tolerant of footnote
+        # markers / stray whitespace / minor markup differences.
+        if any(h.strip().lower() == "ticker" for h in ths):
             target = table
             break
 
     if target is None:
         debug_path = Path("wiki_debug.html")
-        debug_path.write_text(r.text, encoding="utf-8")
+        debug_path.write_text(html, encoding="utf-8")
+        headers_preview = " | ".join(str(h[:6]) for h in all_headers)
         raise RuntimeError(
-            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s), "
-            f"response length {len(r.text)}, status {r.status_code}. "
+            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s). "
+            f"Headers seen: {headers_preview}. "
             f"Dumped response to {debug_path} for inspection."
         )
 
