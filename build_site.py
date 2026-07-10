@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import datetime as dt
 from pathlib import Path
@@ -76,29 +77,82 @@ def _fetch_nasdaq100_html() -> str:
     return data["parse"]["text"]
 
 
+TICKER_RE = re.compile(r"^[A-Z]{1,6}([.-][A-Z])?$")
+
+
+def _looks_like_components_table(table) -> tuple[bool, int, float]:
+    """
+    Structural check: does this table's first column look like ~100 stock
+    tickers? Returns (is_match, row_count, ticker_ratio).
+    """
+    rows = table.find_all("tr")
+    if len(rows) < 90:
+        return False, len(rows), 0.0
+
+    checked = 0
+    matches = 0
+    for row in rows[1:111]:  # skip header row, sample up to 110 data rows
+        cells = row.find_all(["td", "th"])
+        if not cells:
+            continue
+        first = cells[0].get_text(strip=True).replace(".", "-")
+        checked += 1
+        if TICKER_RE.match(first):
+            matches += 1
+
+    if checked == 0:
+        return False, len(rows), 0.0
+
+    ratio = matches / checked
+    return ratio > 0.85, len(rows), ratio
+
+
+def _find_components_table(soup, tables):
+    """
+    Try the cheap header-text match first; fall back to a structural scan
+    of every <table> on the page (not just class="wikitable") that looks
+    like it holds ~100 ticker symbols in its first column. This is immune
+    to Wikipedia renaming headers or changing table classes.
+    """
+    for table in tables:
+        ths = [th.get_text(strip=True) for th in table.find_all("th")]
+        if any(h.strip().lower() == "ticker" for h in ths):
+            is_match, _, _ = _looks_like_components_table(table)
+            if is_match:
+                return table
+
+    # Structural fallback: scan ALL tables on the page, any class.
+    candidates = []
+    for table in soup.find_all("table"):
+        is_match, row_count, ratio = _looks_like_components_table(table)
+        if is_match:
+            candidates.append((row_count, ratio, table))
+
+    if candidates:
+        # Prefer the largest matching table (the full constituent list,
+        # not a smaller "top 10 holdings" style table).
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        return candidates[0][2]
+
+    return None
+
+
 def _scrape_nasdaq100_symbols() -> list[str]:
     html = _fetch_nasdaq100_html()
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.find_all("table", class_="wikitable")
 
-    target = None
-    all_headers = []
-    for table in tables:
-        ths = [th.get_text(strip=True) for th in table.find_all("th")]
-        all_headers.append(ths)
-        # Lenient match: case-insensitive substring, tolerant of footnote
-        # markers / stray whitespace / minor markup differences.
-        if any(h.strip().lower() == "ticker" for h in ths):
-            target = table
-            break
+    target = _find_components_table(soup, tables)
 
     if target is None:
         debug_path = Path("wiki_debug.html")
         debug_path.write_text(html, encoding="utf-8")
+        all_headers = [[th.get_text(strip=True) for th in t.find_all("th")] for t in tables]
         headers_preview = " | ".join(str(h[:6]) for h in all_headers)
         raise RuntimeError(
-            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s). "
-            f"Headers seen: {headers_preview}. "
+            f"Could not find NASDAQ-100 table. Got {len(tables)} wikitable(s) "
+            f"and {len(soup.find_all('table'))} table(s) total. "
+            f"Wikitable headers seen: {headers_preview}. "
             f"Dumped response to {debug_path} for inspection."
         )
 
