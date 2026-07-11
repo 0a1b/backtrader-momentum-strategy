@@ -25,7 +25,7 @@ WIKI_URL = "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
 
 LOOKBACK_PERIOD = int(os.getenv("LOOKBACK_PERIOD", "250"))
 ROC_PERIOD = int(os.getenv("ROC_PERIOD", "250"))
-TOP_N = int(os.getenv("TOP_N", "5"))
+TOP_N = int(os.getenv("TOP_N", "10"))
 YF_PERIOD = os.getenv("YF_PERIOD", "3y")  # ensure enough data
 
 USER_AGENT = (
