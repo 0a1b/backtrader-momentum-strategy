@@ -463,6 +463,10 @@ def main() -> int:
     back = simulate_s5_backfill(close)
     st = seatbelt_state(back)
 
+    # Ensure target directory exists before writing outputs
+    out_dir = HERE / "_v2"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     out = ranked.reset_index()
     out = out.rename(columns={out.columns[0]: "ticker"})
     out["s5_weight_pct"] = out["ticker"].map(lambda t: meta["weights_s5"].get(t, np.nan) * 100)
