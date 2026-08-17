@@ -466,12 +466,12 @@ def main() -> int:
     out = ranked.reset_index()
     out = out.rename(columns={out.columns[0]: "ticker"})
     out["s5_weight_pct"] = out["ticker"].map(lambda t: meta["weights_s5"].get(t, np.nan) * 100)
-    out.to_csv(HERE / "ranking.csv", index=False)
+    out.to_csv(HERE / "_v2"/ "ranking.csv", index=False)
 
-    back.drop(columns=["depth_on", "vel_on"]).round(4).to_csv(HERE / "s5ov_state.csv")
+    back.drop(columns=["depth_on", "vel_on"]).round(4).to_csv(HERE / "_v2"/ "s5ov_state.csv")
 
     html = render_html(ranked.head(DISPLAY_N), meta, back, st, gld)
-    (HERE / "index.html").write_text(html, encoding="utf-8")
+    (HERE / "_v2"/ "index.html").write_text(html, encoding="utf-8")
 
     print(f"\nS5ov as of {st['asof']}  (eligible: {meta['n_universe']}, GLD: "
           f"{gld.iloc[-1] if gld is not None and gld.notna().any() else 'n/a'})")
