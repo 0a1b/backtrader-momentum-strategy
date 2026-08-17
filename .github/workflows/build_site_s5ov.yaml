@@ -24,7 +24,7 @@ jobs:
       - name: Install
         run: pip install -r req_html.txt
       - name: Generate site
-        run: build_site_s5ov.py
+        run: python build_site_s5ov.py
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
